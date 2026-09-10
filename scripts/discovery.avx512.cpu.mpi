@@ -1,9 +1,87 @@
 #!/bin/bash
 #
 # Author: Justin Dean
-# Email: justd3an@anl.gov
-# Last Modified: 09/02/2026
+# Last Modified: 09/04/2026
 #
-# Get compilers and libraries for gpt
+# Build gpt + Grid + cgpt on Discovery (Cascade Lake, AVX-512)
+# RUN ON A COMPUTE NODE, e.g.:
+#   srun -n1 -c16 --mem-per-cpu=4g -p normal -t 03:00:00 --nodelist=discovery-c[26-36] --constraint=cascade-lake --pty /bin/bash
+# Assumes gpt is already cloned at $HOME/gpt
 
-export MODULEPATH=$MODULEPATH:/bug/opt/modulefiles
+set -eo pipefail
+
+# --- environment ---
+module -q purge
+module load os/rhel_8
+module load spack/2023a
+module load gcc/12.2.0-2023a-gcc_8.5.0-e643dqu
+module load openmpi/4.1.4-2023a-gcc_12.2.0-slurm-pmix_v4-uqxdoti
+module load hdf5/1.12.2-2023a-gcc_12.2.0-openmpi_4.1.4-slurm-pmix_v4-qnam2v5
+module load fftw/3.3.10-2023a-gcc_12.2.0-openmpi_4.1.4-slurm-pmix_v4-5hw6z5a
+
+# Discovery sets LIBRARY_PATH but NOT LD_LIBRARY_PATH — mirror it for runtime .so resolution
+export LD_LIBRARY_PATH=$LIBRARY_PATH:$LD_LIBRARY_PATH
+
+source "$HOME/.miniforge3/etc/profile.d/conda.sh"
+conda activate lqcd
+
+# --- paths ---
+root="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." >/dev/null 2>&1 && pwd)"
+printf 'root directory: %s\n' "$root"
+dep=${root}/gpt/dependencies
+
+# --- precompile python ---
+echo "Compile gpt"
+python3 -m compileall ${root}/gpt/lib/gpt
+
+# --- dependencies dir ---
+if [ -d ${dep} ]; then
+    echo "$dep already exists ; rm -rf $dep before bootstrapping again"
+    exit 1
+fi
+mkdir -p ${dep}
+cd ${dep}
+
+# --- LIME ---
+wget https://github.com/usqcd-software/c-lime/tarball/master
+tar xzf master
+mv usqcd-software-c-lime* lime
+rm -f master
+echo "Adding -fPIC flag----------------------"
+cd lime/lib
+awk '1; END { print "liblime_a_CXXFLAGS = -fPIC" }' Makefile.am > Makefile.tmp && mv Makefile.tmp Makefile.am
+cd ..
+./autogen.sh
+CC=gcc CFLAGS="$CFLAGS -fPIC" ./configure
+make -j 16
+cd ${dep}
+
+# --- Grid: lehner/Grid feature/gpt (the branch matched to lehner/gpt) ---
+git clone https://github.com/lehner/Grid.git
+cd Grid
+git checkout feature/gpt
+./bootstrap.sh
+mkdir build
+cd build
+../configure CXX=mpicxx CXXFLAGS="-fPIC -march=cascadelake -mtune=cascadelake" \
+    --enable-shm=shmget --enable-comms=mpi-auto --enable-simd=AVX512 \
+    --enable-fftw --with-fftw=$FFTW_ROOT --with-lime=${dep}/lime
+cd Grid
+make -j 16
+
+# --- cgpt ---
+echo "now the cgpt dep-------------------------"
+cd ${root}/gpt/lib/cgpt
+rm -rf build
+./make ${root}/gpt/dependencies/Grid/build 16
+# completion check — must print nothing
+echo "--- checking for failed cgpt units ---"
+fail=0
+for f in build/logs/*.err; do [ -s "$f" ] && { echo "FAILED: $f"; fail=1; }; done
+[ $fail -eq 0 ] && echo "cgpt: all units compiled" || { echo "cgpt build INCOMPLETE"; exit 1; }
+
+# --- test ---
+echo "now source------------------------------"
+echo "To use: source ${root}/gpt/lib/cgpt/build/source.sh"
+source ${root}/gpt/lib/cgpt/build/source.sh
+python3 -c 'import gpt as g; g.message("Hello World")'

@@ -1,0 +1,66 @@
+#!/bin/bash
+#SBATCH --job-name=pyquda_install
+#SBATCH --output=/fs1/home/justd3an/outs/junk/%x-%j.out
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=6G
+#SBATCH --time=03:00:00
+#SBATCH --gres=gpu:v100:1
+#SBATCH --constraint=cascade-lake   # steers to g8–11, the 32GB V100s
+#
+# Author: Justin Dean
+# Last Modified: 09/10/2026
+#
+# Build QUDA + PyQUDA on Discovery, then run GPU tests
+# RUN ON A COMPUTE NODE: sbatch Discovery.quda
+# Assumes quda is already cloned at /fs1/home/<username>/quda
+
+module purge
+module load os/rhel_8
+module load spack/2023a
+module load gcc/12.2.0-2023a-gcc_8.5.0-e643dqu
+module load cuda/12.1.0-2023a-gcc_12.2.0-eqyilhs
+
+which nvcc && nvcc --version
+gcc --version
+cmake --version
+
+source "$HOME/.miniforge3/etc/profile.d/conda.sh"
+conda activate lqcd
+
+SRC_DIR="/fs1/home/justd3an/quda"
+BUILD_DIR="/fs1/home/justd3an/.quda-build"
+
+# clean configure — you changed modules, so don't trust a stale cache
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR" || exit 1
+
+cmake "$SRC_DIR" \
+  -DCMAKE_BUILD_TYPE=RELEASE \
+  -DQUDA_GPU_ARCH=sm_70 \
+  -DQUDA_DIRAC_WILSON=ON \
+  -DQUDA_DIRAC_CLOVER=ON \
+  -DQUDA_MPI=OFF \
+  -DQUDA_QMP=OFF \
+  -DQUDA_BUILD_SHAREDLIB=ON \
+  -DQUDA_BUILD_ALL_TESTS=ON || exit 1
+
+make -j"${SLURM_CPUS_PER_TASK}" || exit 1
+
+# make libquda.so findable for the tests and for PyQUDA
+export LD_LIBRARY_PATH="$BUILD_DIR/lib:$LD_LIBRARY_PATH"
+
+# --- GPU tests: confirm the build is numerically sane on the V100 ---
+# autotuning writes the tunecache here; keep it for later production runs
+export QUDA_RESOURCE_PATH="$BUILD_DIR/tunecache"
+mkdir -p "$QUDA_RESOURCE_PATH"
+
+cd "$BUILD_DIR" || exit 1
+ctest --output-on-failure || echo "WARNING: some QUDA tests failed — inspect before trusting the build"
+
+# --- PyQUDA ---
+export QUDA_PATH="$BUILD_DIR"
+python3 -m pip install pyquda pyquda-utils
+
+echo "Done. QUDA build at $BUILD_DIR, tunecache at $QUDA_RESOURCE_PATH"
