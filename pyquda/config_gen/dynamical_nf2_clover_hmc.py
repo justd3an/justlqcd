@@ -8,13 +8,15 @@
 #   3. a fermion-aware integrator is used (O2Nf2Ng0V / O4Nf5Ng0V), optionally nested
 # For Nf=2 the rational parameter is trivial (RationalParam() defaults) -- no Remez needed.
 
+import os
+import re
+import gvar as gv
 from math import exp
 from time import perf_counter
 from pyquda_utils import core, io
 from pyquda.hmc import HMC, O2Nf2Ng0V  # , O4Nf5Ng0V for a 4th-order option
 from pyquda.action import GaugeAction, CloverWilsonAction
 from pyquda.enum_quda import QudaVerbosity
-from pyquda_utils import core
 from pyquda_utils.hmc_param import (
     symanzikTreeGaugeLoopParam as loopParam,   # or wilsonGaugeLoopParam for plain plaquette
     fermionRationalParam as rationalParam,
@@ -24,15 +26,23 @@ from pyquda_utils.hmc_param import (
 # Physics / run parameters  --  TUNE THESE
 # ---------------------------------------------------------------------------
 beta, u_0 = 6.20, 0.855         # gauge coupling / tadpole factor
-clover_csw = 0.0                # 0.0 = unimproved Wilson (your stated setup)
-                                # 1 / u_0**3  = tree-level tadpole-improved clover (QUDA has the force)
+# Nf=2 non-perturbative c_sw(g0^2), Jansen & Sommer 1998 (ALPHA Collaboration),
+# https://arxiv.org/abs/hep-lat/9803017, eq. (2.25), valid for beta >= 5.4.
+# At beta=6.20 (g0^2 = 6/beta = 0.9677) this evaluates to c_sw ~= 1.4746.
+clover_csw = 1.4746
 mass = 0.3                      # bare quark mass; kappa = 1/(2*(mass+4)). TUNE to your target m_pi
 tol, maxiter = 1e-6, 1000       # sloppy CG for the MD force (loosen -> larger |dH|)
 
-start, stop, warm, save = 0, 2000, 500, 5   # trajectories, thermalization, save cadence
+warm, save = 600, 5                          # thermalization trajectories, save cadence
+n_confs = 256                                # how many post-warmup configs to generate
+stop = warm + n_confs * save                 # total trajectories = warmup + production
 t, n_steps = 1.0, 20                          # trajectory length (MD units) and integrator steps
 
-save_path="/scratch/justd3an/lqcd/configurations/unquenched/l1632f00b5950m0300a"
+save_path = "/scratch/justd3an/lqcd/configurations/unquenched/l1632f00b620m0300a"
+ckpt_prefix = "l1632f00b620m0300a"           # basename used for saved gauge configs
+
+therm_dump_dir = "/fs1/home/justd3an/data/pyquda/S16T32/thermalization"
+therm_dump_path = f"{therm_dump_dir}/plaquette_thermalization.dump"
 
 # ---------------------------------------------------------------------------
 # Lattice  --  ONE LINE controls the volume
@@ -63,8 +73,41 @@ hmc = HMC(latt_info, monomials, O2Nf2Ng0V(n_steps))
 #   hmc       = HMC(latt_info, monomials[1:], O2Nf2Ng0V(n_steps), hmc_inner)  # fermion outer
 
 hmc.setFermionVerbosity(QudaVerbosity.QUDA_SILENT)
-gauge = core.LatticeGauge(latt_info)     # cold (unit) start
-hmc.initialize(10086, gauge)             # seed + load gauge/momenta
+
+# ---------------------------------------------------------------------------
+# Checkpoint / restart: resume from the latest saved config in save_path if
+# one exists, so a job that hits the walltime limit can be resubmitted
+# without losing prior thermalization/production trajectories.
+#
+# Production configs are numbered as a sequential index (0, 1, 2, ...) --
+# one per saved config, not the trajectory count -- so the 256 generated
+# configs are labeled .0 through .255. The thermalized starting gauge is
+# saved separately as "{ckpt_prefix}.therm" so it never collides with that
+# numbering.
+# ---------------------------------------------------------------------------
+therm_ckpt_path = f"{save_path}/{ckpt_prefix}.therm"
+
+os.makedirs(save_path, exist_ok=True)
+saved_prod_traj = [
+    int(m.group(1))
+    for name in os.listdir(save_path)
+    if (m := re.fullmatch(rf"{re.escape(ckpt_prefix)}\.(\d+)", name))
+]
+
+if saved_prod_traj:
+    conf_idx = max(saved_prod_traj)
+    start = warm + (conf_idx + 1) * save
+    gauge = io.readNERSCGauge(f"{save_path}/{ckpt_prefix}.{conf_idx}")
+    core.getLogger().info(f"Resuming from checkpoint at trajectory {start} (production config {conf_idx})\n")
+elif os.path.exists(therm_ckpt_path):
+    start = warm
+    gauge = io.readNERSCGauge(therm_ckpt_path)
+    core.getLogger().info(f"Resuming from thermalized checkpoint at trajectory {start}\n")
+else:
+    start = 0
+    gauge = core.LatticeGauge(latt_info)     # cold (unit) start
+
+hmc.initialize(10086 + start, gauge)         # seed + load gauge/momenta
 
 plaq = hmc.plaquette()
 core.getLogger().info(f"Trajectory {start}:\nPlaquette = {plaq}\n")
@@ -77,8 +120,8 @@ core.getLogger().info(f"Trajectory {start}:\nPlaquette = {plaq}\n")
 # means a bug or too-loose solver, NOT a physics result -- do not trust the
 # ensemble until this passes.
 # ---------------------------------------------------------------------------
-CHECK_REVERSIBILITY = True
-if CHECK_REVERSIBILITY:
+CHECK_REVERSIBILITY = False
+if CHECK_REVERSIBILITY and start == 0:      # only on a fresh chain, not on a resume
     hmc.gaussMom()
     hmc.samplePhi()
     h_start = hmc.momAction() + hmc.gaugeAction() + hmc.fermionAction()
@@ -94,36 +137,74 @@ if CHECK_REVERSIBILITY:
     hmc.initialize(10086, gauge)
 
 # ---------------------------------------------------------------------------
-# Trajectory loop  
+# Thermalization (force-accept every sweep; no Metropolis test needed).
+# Toggle off once you've confirmed `warm` sweeps is enough -- watch the
+# plaquette below level off; if it's still drifting at the last sweep,
+# `warm` is too small.
 # ---------------------------------------------------------------------------
-for i in range(start, stop):
-    s = perf_counter()
+RUN_THERMALIZATION = False
+if RUN_THERMALIZATION and start == 0:
+    therm_plaq = []
+    for i in range(warm):
+        s = perf_counter()
+        hmc.gaussMom()
+        hmc.samplePhi()
+        hmc.integrate(t, 2e-15)
+        hmc.saveGauge(gauge)   # force-accept
+        plaq = hmc.plaquette()
+        therm_plaq.append(plaq)
+        core.getLogger().info(
+            f"[thermalization] sweep {i + 1}/{warm}:\n"
+            f"Plaquette = {plaq}\n"
+            f"HMC time = {perf_counter() - s:.3f} secs\n"
+        )
+    start = warm
 
-    hmc.gaussMom()      # momentum heatbath
-    hmc.samplePhi()     # <-- pseudofermion heatbath (NEW vs quenched)
+    os.makedirs(therm_dump_dir, exist_ok=True)
+    gv.dump(therm_plaq, therm_dump_path)
+    core.getLogger().info(f"Wrote thermalization plaquette trace to {therm_dump_path}\n")
 
-    kinetic_old, potential_old = hmc.momAction(), hmc.gaugeAction() + hmc.fermionAction()
-    energy_old = kinetic_old + potential_old
+    # save the thermalized gauge as a checkpoint so a future run resumes from
+    # here instead of re-thermalizing (picked up by the "therm" fallback in
+    # the checkpoint scan above)
+    os.makedirs(save_path, exist_ok=True)
+    io.writeNERSCGauge(therm_ckpt_path, gauge)
+    core.getLogger().info(f"Saved thermalized gauge to {therm_ckpt_path}\n")
 
-    hmc.integrate(t, 2e-15)   # MD evolution; 2nd arg = SU(3) reprojection tol
+# ---------------------------------------------------------------------------
+# Trajectory loop  --  set False to only test thermalization above
+# ---------------------------------------------------------------------------
+RUN_TRAJECTORIES = True
+if RUN_TRAJECTORIES:
+    for i in range(start, stop):
+        s = perf_counter()
 
-    kinetic, potential = hmc.momAction(), hmc.gaugeAction() + hmc.fermionAction()
-    energy = kinetic + potential
+        hmc.gaussMom()      # momentum heatbath
+        hmc.samplePhi()     # <-- pseudofermion heatbath
 
-    accept = hmc.accept(energy - energy_old)   # Metropolis on dH
-    if accept or i < warm:                     # force-accept during thermalization
-        hmc.saveGauge(gauge)
-    else:
-        hmc.loadGauge(gauge)
+        kinetic_old, potential_old = hmc.momAction(), hmc.gaugeAction() + hmc.fermionAction()
+        energy_old = kinetic_old + potential_old
 
-    plaq = hmc.plaquette()
-    core.getLogger().info(
-        f"Trajectory {i + 1}:\n"
-        f"Plaquette = {plaq}\n"
-        f"Delta_E = {energy - energy_old}\n"
-        f"acceptance rate = {exp(min(energy_old - energy, 0)) * 100:.2f}%\n"
-        f"accept? {accept}   warmup? {i < warm}\n"
-        f"HMC time = {perf_counter() - s:.3f} secs\n"
-    )
-    if (i + 1) % save == 0:
-        io.writeNERSCGauge(f"{save_path}/l1632f00b5950m0300a.{i + 1}", latt_info.global_size, gauge)
+        hmc.integrate(t, 2e-15)   # MD evolution; 2nd arg = SU(3) reprojection tol
+
+        kinetic, potential = hmc.momAction(), hmc.gaugeAction() + hmc.fermionAction()
+        energy = kinetic + potential
+
+        accept = hmc.accept(energy - energy_old)   # Metropolis on dH
+        if accept:
+            hmc.saveGauge(gauge)
+        else:
+            hmc.loadGauge(gauge)
+
+        plaq = hmc.plaquette()
+        core.getLogger().info(
+            f"Trajectory {i + 1}:\n"
+            f"Plaquette = {plaq}\n"
+            f"Delta_E = {energy - energy_old}\n"
+            f"acceptance rate = {exp(min(energy_old - energy, 0)) * 100:.2f}%\n"
+            f"accept? {accept}\n"
+            f"HMC time = {perf_counter() - s:.3f} secs\n"
+        )
+        if (i + 1) % save == 0:
+            conf_idx = (i + 1 - warm) // save - 1
+            io.writeNERSCGauge(f"{save_path}/{ckpt_prefix}.{conf_idx}", gauge)

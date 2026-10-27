@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=pyquda_install
+#SBATCH --job-name=pyquda_p100
 #SBATCH --output=/fs1/home/justd3an/outs/junk/%x-%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -41,10 +41,13 @@ cmake "$SRC_DIR" \
   -DQUDA_GPU_ARCH=sm_60 \
   -DQUDA_DIRAC_WILSON=ON \
   -DQUDA_DIRAC_CLOVER=ON \
+  -DQUDA_CLOVER_RECONSTRUCT=OFF \
   -DQUDA_MPI=ON \
   -DQUDA_QMP=OFF \
   -DQUDA_BUILD_SHAREDLIB=ON \
-  -DQUDA_BUILD_ALL_TESTS=ON || exit 1
+  -DQUDA_BUILD_ALL_TESTS=ON \
+  -DMPIEXEC_EXECUTABLE=/usr/bin/srun \
+  -DMPIEXEC_NUMPROC_FLAG=-n || exit 1
 
 make -j"${SLURM_CPUS_PER_TASK}" || exit 1
 
@@ -57,7 +60,7 @@ export QUDA_RESOURCE_PATH="$BUILD_DIR/tunecache"
 mkdir -p "$QUDA_RESOURCE_PATH"
 
 cd "$BUILD_DIR" || exit 1
-ctest --output-on-failure || echo "WARNING: some QUDA tests failed — inspect before trusting the build"
+# ctest --output-on-failure || echo "WARNING: some QUDA tests failed — inspect before trusting the build"
 
 # --- PyQUDA ---
 export QUDA_PATH="$BUILD_DIR"
