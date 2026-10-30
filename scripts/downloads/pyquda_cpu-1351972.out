@@ -1,0 +1,58 @@
+/srv/software/el8/x86_64/hpc/cuda/12.2.1/bin/nvcc
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2023 NVIDIA Corporation
+Built on Tue_Jul_11_02:20:44_PDT_2023
+Cuda compilation tools, release 12.2, V12.2.128
+Build cuda_12.2.r12.2/compiler.33053471_0
+gcc (GCC) 12.3.0
+Copyright (C) 2022 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+cmake version 3.27.2
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+/srv/software/el8/x86_64/eb/OpenMPI/4.1.5-GCC-12.3.0/bin/mpicc
+CMake Error at cmake/CPM.cmake:19 (file):
+  file DOWNLOAD cannot compute hash on failed download
+
+    status: [28;"Timeout was reached"]
+Call Stack (most recent call first):
+  CMakeLists.txt:36 (include)
+
+
+-- Found Git: /usr/bin/git (found version "2.43.7") 
+-- 
+-- QUDA 1.1.0 (8c9321ed2) **
+-- cmake version: 3.27.2
+-- Source location: /home/jtdean/quda
+-- Build location: /home/jtdean/.quda_build
+-- Build type: RELEASE
+-- QUDA target: CUDA
+-- BLAS prefetch: THREAD
+-- BLAS unroll (streaming): 1
+-- BLAS unroll (reduction): 1
+-- The CXX compiler identification is GNU 12.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /srv/software/el8/x86_64/eb/GCCcore/12.3.0/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- The C compiler identification is GNU 12.3.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /srv/software/el8/x86_64/eb/GCCcore/12.3.0/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - found
+-- Found Threads: TRUE  
+CMake Error at CMakeLists.txt:452 (CPMAddPackage):
+  Unknown CMake command "CPMAddPackage".
+
+
+-- Configuring incomplete, errors occurred!

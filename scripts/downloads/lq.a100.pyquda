@@ -1,27 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=pyquda_a100
-#SBATCH --account=gluonP0.lq2_gpu
-#SBATCH --qos=normal
-#SBATCH --partition=lq2_gpu
-#SBATCH --gpus=a100:1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=06:00:00
-#SBATCH --output=%x-%j.out
 #
 # Author: Justin Dean
-# Last Modified: 10/28/2026
+# Last Modified: 10/30/2026
 #
-# Rebuild QUDA (with multigrid) + PyQUDA on FNAL lq2 A100s
-# RUN ON A COMPUTE NODE: sbatch lq2.a100.pyquda
+# Rebuild QUDA (with multigrid) + PyQUDA for the FNAL lq2 A100s, on the LOGIN NODE (no GPU needed to build).
+# The compute nodes have no internet, and cmake (CPM, Eigen) and uv (PyQUDA from PyPI) need it.
+# make runs with -j4 under nice to go easy on the shared login node: expect several hours.
+# RUN INSIDE TMUX so a dropped ssh session does not kill the build:
+#   tmux new -s quda
+#   bash ~/justlqcd/scripts/downloads/lq.a100.pyquda 2>&1 | tee ~/quda_build.log
+#   (detach: Ctrl-b d, reattach: tmux attach -t quda)
 # Assumes quda is already cloned at $HOME/quda
-# The previous build is moved to $HOME/.quda_build_old; if this build fails, move it back:
+# A working build (one with lib/libquda.so) is moved to $HOME/.quda_build_old; if this build fails, move it back:
 #   rm -rf ~/.quda_build && mv ~/.quda_build_old ~/.quda_build
-# QUDA downloads Eigen at configure time: if cmake fails on the download, run the cmake step on the login node.
 
 
-# same modules as the run scripts: OpenMPI 4.1.5 / GCC 12.3.0, CUDA 12.2.1
 module purge
 module load gompi ucx_cuda ucc_cuda
 module load cuda/12.2.1
@@ -40,15 +33,12 @@ SRC_DIR="$HOME/quda"
 BUILD_DIR="$HOME/.quda_build"
 OLD_DIR="$HOME/.quda_build_old"
 
-# only one build at a time (lq1.cpu.quda and lq2.a100.pyquda may both be queued); a job killed by Slurm can leave the lock behind: rmdir it
-LOCK="$HOME/.quda_build.lock"
-mkdir "$LOCK" 2>/dev/null || { echo "another QUDA build is running ($LOCK exists), exiting"; exit 1; }
-trap 'rmdir "$LOCK"' EXIT
-
-# keep the previous build until this one is known to work
-if [ -d "$BUILD_DIR" ]; then
+# keep the previous WORKING build until this one is known to work; a failed or half-configured build is just removed
+if [ -f "$BUILD_DIR/lib/libquda.so" ]; then
   rm -rf "$OLD_DIR"
   mv "$BUILD_DIR" "$OLD_DIR" || exit 1
+else
+  rm -rf "$BUILD_DIR"
 fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR" || exit 1
@@ -72,19 +62,16 @@ cmake "$SRC_DIR" \
   -DMPIEXEC_NUMPROC_FLAG=-n \
   -DMPIEXEC_PREFLAGS=--mpi=pmix || exit 1
 
-make -j"${SLURM_CPUS_PER_TASK:-16}" || exit 1
+nice -n 19 make -j4 || exit 1
 
 grep -E "^(CMAKE_BUILD_TYPE|QUDA_MULTIGRID|QUDA_GPU_ARCH|QUDA_MPI):" "$BUILD_DIR/CMakeCache.txt"
 
-# make libquda.so findable for the tests and for PyQUDA
+# make libquda.so findable for PyQUDA
 export LD_LIBRARY_PATH="$BUILD_DIR/lib:$LD_LIBRARY_PATH"
 
-# autotuning writes the tunecache here; keep it for later production runs
+# autotuning writes the tunecache here at the first GPU run; keep it for later production runs
 export QUDA_RESOURCE_PATH="$BUILD_DIR/tunecache"
 mkdir -p "$QUDA_RESOURCE_PATH"
-
-cd "$BUILD_DIR" || exit 1
-# ctest --output-on-failure || echo "WARNING: some QUDA tests failed — inspect before trusting the build"
 
 # --- PyQUDA: rebuild its QUDA bindings against the new libquda.so ---
 # pinned to the installed versions; --no-cache so uv cannot reuse the bindings built against the old QUDA,
